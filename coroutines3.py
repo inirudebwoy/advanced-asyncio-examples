@@ -1,14 +1,3 @@
-"""
-Handling of coroutine errors
-works when gather(return_exceptions=True and False)
-
-
-Thougths:
-* quick, with return_exceptions=True might not fail
-* not possible to clean up in case of failure
-* not possible to interrupt processing
-* not able to track execution unless coroutines report output
-"""
 import asyncio
 import logging
 import random
@@ -19,51 +8,70 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 
 MAX_RETRIES = 3
-
-# recursion, may hit limit? though limits are high. What exactly are they?
-# can't cleanup in case of error, unable to cancel
+ASYNCIO_TOTAL_TIMEOUT = 3
+HTTP_TIMEOUT = 1
 
 
 async def supervisor(
-    url: str, name: str, client: aiohttp.ClientSession, retry: int = 0
+    worker,
+    url: str,
+    name: str,
+    client: aiohttp.ClientSession,
+    retry: int = 0,
 ) -> int:
     try:
         return await worker(url, name, client)
-    except RuntimeError:
+    except (
+        aiohttp.ServerDisconnectedError,
+        aiohttp.ServerTimeoutError,
+        asyncio.TimeoutError,
+    ):
         retry += 1
         if retry < MAX_RETRIES:
-            # jitter
-            await asyncio.sleep(random.random())
             logging.warning("Retrying coroutine %s. Retry: %s", name, retry)
-            return await supervisor(url, name, client, retry)
+            return await supervisor(worker, url, name, client, retry)
 
-        logging.error("Retries exhausted for call args %s", (url, client, retry))
+        logging.warning("Retries exhausted for call args %s", (url, client, retry))
         return 0
-    except Exception:
-        logging.error("Failed to finish")
+    except Exception as e:
+        logging.error("Irrecoverable error %r.", e)
+        logging.error("Failed to finish coroutine %s.", name)
         return 0
 
 
-# tenacity can be used here
 async def worker(url: str, name: str, session: aiohttp.ClientSession) -> int:
-    if random.random() > 0.9:
+    bad_luck: float = random.random()
+    if bad_luck > 0.9:
+        logging.warning("Status: failed, name: %s, bad luck: %.2f", name, bad_luck)
         raise random.choice(
             [aiohttp.ServerDisconnectedError, aiohttp.ServerTimeoutError, RuntimeError]
         )
 
-    async with session.get(url) as response:
+    async with session.get(url, timeout=HTTP_TIMEOUT) as response:
+        logging.debug(
+            "Status: %s, name: %s, bad luck: %.2f", response.status, name, bad_luck
+        )
         return response.status
 
 
-# Python < 3.11 wait would work
 async def main():
     async with aiohttp.ClientSession() as client:
         start = time.perf_counter()
-        coros = [supervisor("https://klichx.dev", str(i), client) for i in range(0, 40)]
+        coros = [
+            asyncio.create_task(
+                supervisor(worker, "https://klichx.dev", str(i), client)
+            )
+            for i in range(0, 20)
+        ]
         try:
             done, pending = await asyncio.wait(
-                coros, return_when=asyncio.FIRST_COMPLETED
+                coros, timeout=ASYNCIO_TOTAL_TIMEOUT, return_when=asyncio.ALL_COMPLETED
             )
+            for t in done:
+                logging.info("Task %s done", t.get_name())
+
+            for t in pending:
+                logging.info("Task %s pending", t.get_name())
         except asyncio.CancelledError:
             # can't cancel
             logging.info("CANCEL")
@@ -71,13 +79,8 @@ async def main():
 
         logging.info("Finished")
         logging.info("Took %.2f s", time.perf_counter() - start)
-        logging.info("Result %s", res)
 
 
-# loop = asyncio.get_event_loop()
-# task = loop.create_task(main())
-# loop.call_later(1, task.cancel)
-# loop.run_until_complete(task)
 try:
     asyncio.run(main())
 except KeyboardInterrupt:

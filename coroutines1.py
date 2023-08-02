@@ -1,14 +1,3 @@
-"""
-Handling of coroutine errors
-works when gather(return_exceptions=True and False)
-
-
-Thougths:
-* quick, with return_exceptions=True might not fail
-* not possible to clean up in case of failure
-* not possible to interrupt processing
-* not able to track execution unless coroutines report output
-"""
 import asyncio
 import logging
 import random
@@ -19,9 +8,8 @@ import aiohttp
 logging.basicConfig(level=logging.DEBUG)
 
 MAX_RETRIES = 3
-
-# recursion, may hit limit? though limits are high. What exactly are they?
-# can't cleanup in case of error, unable to cancel
+ASYNCIO_TOTAL_TIMEOUT = 3
+HTTP_TIMEOUT = 1
 
 
 async def supervisor(
@@ -36,8 +24,6 @@ async def supervisor(
     except (aiohttp.ServerDisconnectedError, aiohttp.ServerTimeoutError):
         retry += 1
         if retry < MAX_RETRIES:
-            # jitter
-            await asyncio.sleep(random.random())
             logging.warning("Retrying coroutine %s. Retry: %s", name, retry)
             return await supervisor(worker, url, name, client, retry)
 
@@ -49,18 +35,18 @@ async def supervisor(
         return 0
 
 
-# tenacity can be used here
 async def worker(url: str, name: str, session: aiohttp.ClientSession) -> int:
     bad_luck: float = random.random()
     if bad_luck > 0.9:
-        logging.warning("Status: failed, name: %s, bad luck: %s", name, bad_luck)
+        await asyncio.sleep(10)
+        logging.warning("Status: failed, name: %s, bad luck: %.2f", name, bad_luck)
         raise random.choice(
             [aiohttp.ServerDisconnectedError, aiohttp.ServerTimeoutError, RuntimeError]
         )
 
-    async with session.get(url) as response:
+    async with session.get(url, timeout=HTTP_TIMEOUT) as response:
         logging.debug(
-            "Status: %s, name: %s, bad luck: %s", response.status, name, bad_luck
+            "Status: %s, name: %s, bad luck: %.2f", response.status, name, bad_luck
         )
         return response.status
 
@@ -77,19 +63,16 @@ async def main():
                 *coros,
                 return_exceptions=False,
             )
-        # If return_exceptions is False, cancelling gather() after it has been
-        # marked done won’t cancel any submitted awaitables. For instance,
-        # gather can be marked done after propagating an exception to the caller,
-        # therefore, calling gather.cancel() after catching an exception
-        # (raised by one of the awaitables) from gather won’t cancel
-        # any other awaitables.
         except asyncio.CancelledError:
-            # can't cancel
             logging.info("CANCEL")
             return
 
+        logging.info("Finished")
         logging.info("Took %.2f s", time.perf_counter() - start)
         logging.info("Result count %s, and items: %s", len(res), res)
 
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    logging.info("User cancelled.")
