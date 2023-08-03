@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 MAX_RETRIES = 3
 ASYNCIO_TOTAL_TIMEOUT = 3
 HTTP_TIMEOUT = 1
-
+WORKERS_COUNT = 20
 
 async def supervisor(
     worker,
@@ -61,7 +61,7 @@ async def main():
             asyncio.create_task(
                 supervisor(worker, "https://klichx.dev", str(i), client)
             )
-            for i in range(0, 20)
+            for i in range(0, WORKERS_COUNT)
         ]
         try:
             done, pending = await asyncio.wait(
